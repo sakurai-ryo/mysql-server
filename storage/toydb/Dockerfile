@@ -33,14 +33,9 @@ RUN dnf install -y \
     elfutils \
     bison
 
-# CMakeLists.txt のみ先にコピー (cmake configure でターゲット登録に必要)
-# これは滅多に変更しないのでキャッシュが効く
-# ADD_LIBRARY がソースファイルの存在を要求するため、ダミーを作成しておく
+
 COPY CMakeLists.txt ha_toydb.cc ha_toydb.h /usr/src/mysql-src/storage/toydb/
 
-# MySQL ビルドシステムを configure する
-# ここでは設定のみ行い、サーバー本体はコンパイルしない
-# Boost は cmake が自動でダウンロードする
 WORKDIR /usr/src/build
 RUN cmake /usr/src/mysql-src \
     -DDOWNLOAD_BOOST=1 \
@@ -55,11 +50,10 @@ RUN cmake --build . --target toydb -- -j$(nproc)
 # ==========================================================
 FROM mysql:8.4
 
-# ビルドした .so をプラグインディレクトリにコピー
 COPY --from=builder /usr/src/build/plugin_output_directory/ha_toydb.so \
     /usr/lib64/mysql/plugin/
 
-# 初回起動時に自動でプラグインをインストールする
+# 初回起動時に自動でプラグインをインストール
 RUN echo 'INSTALL PLUGIN toydb SONAME "ha_toydb.so";' \
     > /docker-entrypoint-initdb.d/install_toydb.sql
 
