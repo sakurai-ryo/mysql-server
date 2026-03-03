@@ -14,25 +14,25 @@ static handler *toydb_create_handler(handlerton *hton, TABLE_SHARE *table,
 
 handlerton *toydb_hton;
 
-/* Interface to mysqld, to check system tables supported by SE */
-static bool toydb_is_supported_system_table(const char *db,
-                                            const char *table_name,
-                                            bool is_sql_layer_system_table);
-
 Toydb_share::Toydb_share() { thr_lock_init(&lock); }
 
+/// Storage Engineの初期化
 static int toydb_init_func(void *p) {
   DBUG_TRACE;
 
   toydb_hton = (handlerton *)p;
-  toydb_hton->state = SHOW_OPTION_YES;
   toydb_hton->create = toydb_create_handler;
+  toydb_hton->state = SHOW_OPTION_YES;
   toydb_hton->flags = HTON_CAN_RECREATE;
-  toydb_hton->is_supported_system_table = toydb_is_supported_system_table;
+  // システムテーブルのサポートはしないので常にfalseを返す
+  toydb_hton->is_supported_system_table = [](const char *, const char *,
+                                             bool) -> bool { return false; };
 
   return 0;
 }
 
+/// Storage Engineのdeconstructor
+/// 今回は特に処理はなし
 static int toydb_deinit_func(void *p [[maybe_unused]]) {
   DBUG_TRACE;
 
@@ -66,28 +66,6 @@ static handler *toydb_create_handler(handlerton *hton, TABLE_SHARE *table, bool,
 ha_toydb::ha_toydb(handlerton *hton, TABLE_SHARE *table_arg)
     : handler(hton, table_arg) {
   ref_length = sizeof(int64_t);
-}
-
-static st_handler_tablename ha_toydb_system_tables[] = {
-    {(const char *)nullptr, (const char *)nullptr}};
-
-static bool toydb_is_supported_system_table(const char *db,
-                                            const char *table_name,
-                                            bool is_sql_layer_system_table) {
-  st_handler_tablename *systab;
-
-  // Does this SE support "ALL" SQL layer system tables ?
-  if (is_sql_layer_system_table) return false;
-
-  // Check if this is SE layer system tables
-  systab = ha_toydb_system_tables;
-  while (systab && systab->db) {
-    if (systab->db == db && strcmp(systab->tablename, table_name) == 0)
-      return true;
-    systab++;
-  }
-
-  return false;
 }
 
 int ha_toydb::open(const char *, int, uint, const dd::Table *) {
