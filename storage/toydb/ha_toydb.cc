@@ -16,7 +16,9 @@ handlerton *toydb_hton;
 
 Toydb_share::Toydb_share() { thr_lock_init(&lock); }
 
-/// Storage Engineの初期化
+/**
+ * Storage Engineの初期化を行う
+ */
 static int toydb_init_func(void *p) {
   DBUG_TRACE;
 
@@ -31,8 +33,11 @@ static int toydb_init_func(void *p) {
   return 0;
 }
 
-/// Storage Engineのdeconstructor
-/// 今回は特に処理はなし
+/**
+ * Storage Engineのdeconstructor
+ *
+ * 今回は特に処理はなし
+ */
 static int toydb_deinit_func(void *p [[maybe_unused]]) {
   DBUG_TRACE;
 

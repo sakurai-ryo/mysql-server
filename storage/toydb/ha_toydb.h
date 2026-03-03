@@ -12,14 +12,23 @@
 #include "sql/handler.h" /* handler */
 #include "thr_lock.h"    /* THR_LOCK, THR_LOCK_DATA */
 
-/** @brief
-  Toydb_share is a class that will be shared among all open handlers.
+class Toydb_table {
+ public:
+}
+
+/**
+  全てのhandlerインスタンスで共有するデータを保持するクラス
 */
 class Toydb_share : public Handler_share {
  public:
   THR_LOCK lock;
   std::mutex data_mutex;
+
+  // std::map<std::string,>
+
+  // TODO: 初期実装なので削除する
   std::map<int64_t, std::string> data;
+
   Toydb_share();
   ~Toydb_share() override { thr_lock_delete(&lock); }
 };
