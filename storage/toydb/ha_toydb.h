@@ -1,36 +1,10 @@
-/* Copyright (c) 2004, 2025, Oracle and/or its affiliates.
-
-  This program is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License, version 2.0,
-  as published by the Free Software Foundation.
-
-  This program is designed to work with certain software (including
-  but not limited to OpenSSL) that is licensed under separate terms,
-  as designated in a particular file or component or in included license
-  documentation.  The authors of MySQL hereby grant you an additional
-  permission to link the program and your derivative works with the
-  separately licensed software that they have either included with
-  the program or referenced in the documentation.
-
-  This program is distributed in the hope that it will be useful,
-  but WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-  GNU General Public License, version 2.0, for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program; if not, write to the Free Software
-  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
-
-/** @file ha_toydb.h
-
-    @brief
-  The ha_toydb engine is a stubbed storage engine based on the example engine.
-
-   @see
-  /sql/handler.h and /storage/toydb/ha_toydb.cc
-*/
-
 #include <sys/types.h>
+
+#include <map>
+#include <mutex>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "my_base.h" /* ha_rows */
 #include "my_compiler.h"
@@ -44,6 +18,8 @@
 class Toydb_share : public Handler_share {
  public:
   THR_LOCK lock;
+  std::mutex data_mutex;
+  std::map<int64_t, std::string> data;
   Toydb_share();
   ~Toydb_share() override { thr_lock_delete(&lock); }
 };
@@ -52,9 +28,14 @@ class Toydb_share : public Handler_share {
   Class definition for the storage engine
 */
 class ha_toydb : public handler {
-  THR_LOCK_DATA lock;          ///< MySQL lock
+  THR_LOCK_DATA lock;        ///< MySQL lock
   Toydb_share *share;        ///< Shared lock info
   Toydb_share *get_share();  ///< Get the share
+
+  /// Scan state for rnd_next
+  std::vector<std::pair<int64_t, std::string>> scan_rows;
+  size_t scan_index = 0;
+  int64_t current_key = 0;
 
  public:
   ha_toydb(handlerton *hton, TABLE_SHARE *table_arg);
@@ -82,9 +63,7 @@ class ha_toydb : public handler {
     This is a list of flags that indicate what functionality the storage engine
     implements. The current table flags are documented in handler.h
   */
-  ulonglong table_flags() const override {
-    return HA_BINLOG_STMT_CAPABLE;
-  }
+  ulonglong table_flags() const override { return HA_BINLOG_STMT_CAPABLE; }
 
   /** @brief
     This is a bitmap of flags that indicates how the storage engine

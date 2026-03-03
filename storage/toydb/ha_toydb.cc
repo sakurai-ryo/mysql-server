@@ -1,46 +1,6 @@
-/* Copyright (c) 2004, 2025, Oracle and/or its affiliates.
-
-  This program is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License, version 2.0,
-  as published by the Free Software Foundation.
-
-  This program is designed to work with certain software (including
-  but not limited to OpenSSL) that is licensed under separate terms,
-  as designated in a particular file or component or in included license
-  documentation.  The authors of MySQL hereby grant you an additional
-  permission to link the program and your derivative works with the
-  separately licensed software that they have either included with
-  the program or referenced in the documentation.
-
-  This program is distributed in the hope that it will be useful,
-  but WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-  GNU General Public License, version 2.0, for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program; if not, write to the Free Software
-  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
-
-/**
-  @file ha_toydb.cc
-
-  @brief
-  The ha_toydb engine is a stubbed storage engine based on the example engine.
-
-  @details
-  ha_toydb will let you create/open/delete tables, but
-  nothing further (for example, indexes are not supported nor can data
-  be stored in the table). Use this as a starting point for
-  implementing your own storage engine.
-
-  Once built and installed, MySQL will let you create tables with:
-  CREATE TABLE \<table name\> (...) ENGINE=TOYDB;
-
-  @see
-  /sql/handler.h and /storage/toydb/ha_toydb.h
-*/
-
 #include "storage/toydb/ha_toydb.h"
+
+#include <cstring>
 
 #include "my_dbug.h"
 #include "mysql/plugin.h"
@@ -98,13 +58,15 @@ err:
   return tmp_share;
 }
 
-static handler *toydb_create_handler(handlerton *hton, TABLE_SHARE *table,
-                                     bool, MEM_ROOT *mem_root) {
+static handler *toydb_create_handler(handlerton *hton, TABLE_SHARE *table, bool,
+                                     MEM_ROOT *mem_root) {
   return new (mem_root) ha_toydb(hton, table);
 }
 
 ha_toydb::ha_toydb(handlerton *hton, TABLE_SHARE *table_arg)
-    : handler(hton, table_arg) {}
+    : handler(hton, table_arg) {
+  ref_length = sizeof(int64_t);
+}
 
 static st_handler_tablename ha_toydb_system_tables[] = {
     {(const char *)nullptr, (const char *)nullptr}};
@@ -144,17 +106,40 @@ int ha_toydb::close(void) {
 
 int ha_toydb::write_row(uchar *) {
   DBUG_TRACE;
+
+  int64_t key = table->field[0]->val_int();
+  String val_buf;
+  String *val = table->field[1]->val_str(&val_buf);
+
+  std::lock_guard<std::mutex> guard(share->data_mutex);
+  if (share->data.count(key)) return HA_ERR_FOUND_DUPP_KEY;
+  share->data.emplace(key, std::string(val->ptr(), val->length()));
   return 0;
 }
 
 int ha_toydb::update_row(const uchar *, uchar *) {
   DBUG_TRACE;
-  return HA_ERR_WRONG_COMMAND;
+
+  int64_t new_key = table->field[0]->val_int();
+  String val_buf;
+  String *val = table->field[1]->val_str(&val_buf);
+
+  std::lock_guard<std::mutex> guard(share->data_mutex);
+  if (new_key != current_key) {
+    if (share->data.count(new_key)) return HA_ERR_FOUND_DUPP_KEY;
+    share->data.erase(current_key);
+  }
+  share->data[new_key] = std::string(val->ptr(), val->length());
+  current_key = new_key;
+  return 0;
 }
 
 int ha_toydb::delete_row(const uchar *) {
   DBUG_TRACE;
-  return HA_ERR_WRONG_COMMAND;
+
+  std::lock_guard<std::mutex> guard(share->data_mutex);
+  share->data.erase(current_key);
+  return 0;
 }
 
 int ha_toydb::index_read_map(uchar *, const uchar *, key_part_map,
@@ -195,32 +180,62 @@ int ha_toydb::index_last(uchar *) {
 
 int ha_toydb::rnd_init(bool) {
   DBUG_TRACE;
+
+  std::lock_guard<std::mutex> guard(share->data_mutex);
+  scan_rows.assign(share->data.begin(), share->data.end());
+  scan_index = 0;
   return 0;
 }
 
 int ha_toydb::rnd_end() {
   DBUG_TRACE;
+  scan_rows.clear();
   return 0;
 }
 
-int ha_toydb::rnd_next(uchar *) {
-  int rc;
+int ha_toydb::rnd_next(uchar *buf) {
   DBUG_TRACE;
-  rc = HA_ERR_END_OF_FILE;
-  return rc;
+
+  if (scan_index >= scan_rows.size()) return HA_ERR_END_OF_FILE;
+
+  auto &[key, val] = scan_rows[scan_index++];
+  current_key = key;
+
+  memset(buf, 0, table->s->null_bytes);
+  table->field[0]->store(key, false);
+  table->field[1]->store(val.c_str(), val.length(), system_charset_info);
+  return 0;
 }
 
-void ha_toydb::position(const uchar *) { DBUG_TRACE; }
-
-int ha_toydb::rnd_pos(uchar *, uchar *) {
-  int rc;
+void ha_toydb::position(const uchar *) {
   DBUG_TRACE;
-  rc = HA_ERR_WRONG_COMMAND;
-  return rc;
+  memcpy(ref, &current_key, sizeof(current_key));
+}
+
+int ha_toydb::rnd_pos(uchar *buf, uchar *pos) {
+  DBUG_TRACE;
+
+  int64_t key;
+  memcpy(&key, pos, sizeof(key));
+
+  std::lock_guard<std::mutex> guard(share->data_mutex);
+  auto it = share->data.find(key);
+  if (it == share->data.end()) return HA_ERR_KEY_NOT_FOUND;
+
+  current_key = key;
+  memset(buf, 0, table->s->null_bytes);
+  table->field[0]->store(key, false);
+  table->field[1]->store(it->second.c_str(), it->second.length(),
+                         system_charset_info);
+  return 0;
 }
 
 int ha_toydb::info(uint) {
   DBUG_TRACE;
+  if (share) {
+    std::lock_guard<std::mutex> guard(share->data_mutex);
+    stats.records = share->data.size();
+  }
   return 0;
 }
 
@@ -231,7 +246,9 @@ int ha_toydb::extra(enum ha_extra_function) {
 
 int ha_toydb::delete_all_rows() {
   DBUG_TRACE;
-  return HA_ERR_WRONG_COMMAND;
+  std::lock_guard<std::mutex> guard(share->data_mutex);
+  share->data.clear();
+  return 0;
 }
 
 int ha_toydb::external_lock(THD *, int) {
@@ -268,8 +285,7 @@ static MYSQL_THDVAR_STR(last_create_thdvar, PLUGIN_VAR_MEMALLOC, nullptr,
 static MYSQL_THDVAR_UINT(create_count_thdvar, 0, nullptr, nullptr, nullptr, 0,
                          0, 1000, 0);
 
-int ha_toydb::create(const char *name, TABLE *, HA_CREATE_INFO *,
-                     dd::Table *) {
+int ha_toydb::create(const char *name, TABLE *, HA_CREATE_INFO *, dd::Table *) {
   DBUG_TRACE;
 
   THD *thd = ha_thd();
@@ -398,14 +414,12 @@ static SHOW_VAR show_array_toydb[] = {
     {nullptr, nullptr, SHOW_UNDEF, SHOW_SCOPE_UNDEF}};
 
 static SHOW_VAR func_status[] = {
-    {"toydb_func_toydb", (char *)show_func_toydb, SHOW_FUNC,
-     SHOW_SCOPE_GLOBAL},
+    {"toydb_func_toydb", (char *)show_func_toydb, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     {"toydb_status_var5", (char *)&toydb_vars.var5, SHOW_BOOL,
      SHOW_SCOPE_GLOBAL},
     {"toydb_status_var6", (char *)&toydb_vars.var6, SHOW_LONG,
      SHOW_SCOPE_GLOBAL},
-    {"toydb_status", (char *)show_array_toydb, SHOW_ARRAY,
-     SHOW_SCOPE_GLOBAL},
+    {"toydb_status", (char *)show_array_toydb, SHOW_ARRAY, SHOW_SCOPE_GLOBAL},
     {nullptr, nullptr, SHOW_UNDEF, SHOW_SCOPE_UNDEF}};
 
 mysql_declare_plugin(toydb){
@@ -419,8 +433,8 @@ mysql_declare_plugin(toydb){
     nullptr,           /* Plugin check uninstall */
     toydb_deinit_func, /* Plugin Deinit */
     0x0001 /* 0.1 */,
-    func_status,              /* status variables */
-    toydb_system_variables,   /* system variables */
-    nullptr,                  /* config options */
-    0,                        /* flags */
+    func_status,            /* status variables */
+    toydb_system_variables, /* system variables */
+    nullptr,                /* config options */
+    0,                      /* flags */
 } mysql_declare_plugin_end;
